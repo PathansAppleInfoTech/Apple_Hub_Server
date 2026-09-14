@@ -35,26 +35,49 @@ async function createTeamMember(req, res, next) {
     const password = String(req.body.password || '');
     const role = req.body.role === 'admin' ? 'admin' : 'staff';
 
+    // Convert active status safely to 0 or 1
+    const is_active = Number(req.body.is_active) === 1 ? 1 : 0;
+
     if (!name || !email || !password) {
-      return error(res, 'Name, email and password are required', 422);
+      return error(
+        res,
+        'Name, email and password are required',
+        422
+      );
     }
 
     if (name.length < 2) {
-      return error(res, 'Name must be at least 2 characters', 422);
+      return error(
+        res,
+        'Name must be at least 2 characters',
+        422
+      );
     }
 
     if (name.length > 120) {
-      return error(res, 'Name is too long', 422);
+      return error(
+        res,
+        'Name is too long',
+        422
+      );
     }
 
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
     if (!emailRegex.test(email)) {
-      return error(res, 'Please enter a valid email address', 422);
+      return error(
+        res,
+        'Please enter a valid email address',
+        422
+      );
     }
 
     if (password.length < 8) {
-      return error(res, 'Password must be at least 8 characters', 422);
+      return error(
+        res,
+        'Password must be at least 8 characters',
+        422
+      );
     }
 
     // Check duplicate email before attempting insert
@@ -64,28 +87,48 @@ async function createTeamMember(req, res, next) {
     );
 
     if (existingRows.length > 0) {
-      return error(res, 'An account with this email already exists', 409);
+      return error(
+        res,
+        'An account with this email already exists',
+        409
+      );
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
+    /*
+     * IMPORTANT:
+     * Do NOT hard-code is_active to 1.
+     *
+     * Use the value received from the frontend.
+     */
     const [result] = await pool.query(
-      `INSERT INTO admins
-        (name, email, password, role, is_active)
-       VALUES (?, ?, ?, ?, 1)`,
-      [name, email, hashedPassword, role]
+      `
+        INSERT INTO admins
+          (name, email, password, role, is_active)
+        VALUES (?, ?, ?, ?, ?)
+      `,
+      [
+        name,
+        email,
+        hashedPassword,
+        role,
+        is_active,
+      ]
     );
 
     const [rows] = await pool.query(
-      `SELECT ${SAFE_FIELDS}
-       FROM admins
-       WHERE id = ?
-       LIMIT 1`,
+      `
+        SELECT ${SAFE_FIELDS}
+        FROM admins
+        WHERE id = ?
+        LIMIT 1
+      `,
       [result.insertId]
     );
 
     console.log(
-      `[admin] Team member created: ${email} (${role})`
+      `[admin] Team member created: ${email} (${role}, active=${is_active})`
     );
 
     return success(
@@ -107,6 +150,8 @@ async function createTeamMember(req, res, next) {
     next(err);
   }
 }
+
+
 
 // PUT /api/admin/team/:id
 async function updateTeamMember(req, res, next) {
