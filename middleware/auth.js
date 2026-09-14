@@ -8,21 +8,42 @@ function requireAuth(req, res, next) {
     ? req.headers.authorization.split(' ')[1]
     : null;
 
-  // Prefer HTTP-only cookie, but also support Bearer tokens
-  const token = req.cookies?.token || bearer;
+  const token = req.cookies?.accessToken || bearer;
 
   if (!token) {
-    return error(res, 'Authentication required', 401);
+    return error(
+      res,
+      'Authentication required',
+      401,
+      'AUTH_REQUIRED'
+    );
   }
 
   try {
-    const decoded = jwt.verify(token, config.jwtSecret);
+    const decoded = jwt.verify(
+      token,
+      config.jwtAccessSecret
+    );
 
     req.admin = decoded;
 
     next();
   } catch (err) {
-    return error(res, 'Invalid or expired session', 401);
+    if (err.name === 'TokenExpiredError') {
+      return error(
+        res,
+        'Access token expired',
+        401,
+        'AUTH_ACCESS_TOKEN_EXPIRED'
+      );
+    }
+
+    return error(
+      res,
+      'Invalid access token',
+      401,
+      'AUTH_INVALID_ACCESS_TOKEN'
+    );
   }
 }
 
