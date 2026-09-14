@@ -27,10 +27,17 @@ async function login(req, res, next) {
     const email = String(req.body.email || '').trim().toLowerCase();
     const password = String(req.body.password || '');
 
+    // Validate input
     if (!email || !password) {
-      return error(res, 'Email and password are required', 422);
+      return error(
+        res,
+        'Email and password are required',
+        422,
+        'AUTH_FIELDS_REQUIRED'
+      );
     }
 
+    // Find account
     const [rows] = await pool.query(
       `
         SELECT
@@ -49,16 +56,42 @@ async function login(req, res, next) {
 
     const admin = rows[0];
 
-    if (!admin || !admin.is_active) {
-      return error(res, 'Invalid email or password', 401);
+    // Account does not exist
+    if (!admin) {
+      return error(
+        res,
+        'No account exists with this email address.',
+        401,
+        'ACCOUNT_NOT_FOUND'
+      );
     }
 
-    const isMatch = await bcrypt.compare(password, admin.password);
+    // Account exists but is inactive
+    if (!Number(admin.is_active)) {
+      return error(
+        res,
+        'Your account is inactive. Please contact an administrator.',
+        403,
+        'ACCOUNT_INACTIVE'
+      );
+    }
+
+    // Check password
+    const isMatch = await bcrypt.compare(
+      password,
+      admin.password
+    );
 
     if (!isMatch) {
-      return error(res, 'Invalid email or password', 401);
+      return error(
+        res,
+        'The password you entered is incorrect.',
+        401,
+        'INVALID_PASSWORD'
+      );
     }
 
+    // Public admin payload
     const payload = {
       id: admin.id,
       name: admin.name,
@@ -87,12 +120,14 @@ async function login(req, res, next) {
       }
     );
 
+    // HTTP-only access cookie
     res.cookie(
       'accessToken',
       accessToken,
       ACCESS_COOKIE_OPTIONS
     );
 
+    // HTTP-only refresh cookie
     res.cookie(
       'refreshToken',
       refreshToken,
