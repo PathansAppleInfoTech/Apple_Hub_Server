@@ -9,7 +9,7 @@ const ACCESS_COOKIE_OPTIONS = {
   httpOnly: true,
   secure: config.nodeEnv === 'production',
   sameSite: 'lax',
-  maxAge: 15 * 60 * 1000,
+  // maxAge: 15 * 60 * 1000,
   path: '/',
 };
 
@@ -17,7 +17,7 @@ const REFRESH_COOKIE_OPTIONS = {
   httpOnly: true,
   secure: config.nodeEnv === 'production',
   sameSite: 'lax',
-  maxAge: 7 * 24 * 60 * 60 * 1000,
+  // maxAge: 7 * 24 * 60 * 60 * 1000,
   path: '/api/auth',
 };
 

@@ -4,7 +4,7 @@
 
 require('dotenv').config();
 
-const required = ['DB_HOST', 'DB_NAME', 'DB_USER', 'JWT_SECRET'];
+const required = ['DB_HOST', 'DB_NAME', 'DB_USER', 'DB_PASSWORD', 'JWT_ACCESS_SECRET', 'JWT_REFRESH_SECRET'];
 const missing = required.filter((key) => !process.env[key]);
 
 if (missing.length > 0 && process.env.NODE_ENV !== 'test') {
@@ -32,7 +32,7 @@ module.exports = {
   jwtAccessSecret: process.env.JWT_ACCESS_SECRET,
   jwtRefreshSecret: process.env.JWT_REFRESH_SECRET,
 
-  jwtAccessExpiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '15m',
+  jwtAccessExpiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '5m',
   jwtRefreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d',
 
   clientUrl: process.env.CLIENT_URL || 'http://localhost:5173',
