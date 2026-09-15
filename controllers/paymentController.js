@@ -1,132 +1,412 @@
+const crypto = require('crypto');
+const Razorpay = require('razorpay');
+
 const { pool } = require('../config/db');
 const config = require('../config/env');
 const { success, error } = require('../utils/apiResponse');
+const { generateOrderNumber } = require('../utils/generateOrderNumber');
+const { getNextStaffForOrder } = require('../utils/getNextStaff');
+const { createOrder } = require('./orderController');
 
-// ------------------------------------------------------------------
-// This controller is structured for Razorpay (India's most common
-// gateway), but does not hard-depend on the `razorpay` SDK so the
-// project installs and runs even before real credentials exist.
-//
-// To go live:
-//   1. npm install razorpay
-//   2. Fill PAYMENT_KEY_ID / PAYMENT_KEY_SECRET in .env
-//   3. Replace the placeholder blocks marked "TODO (live gateway)"
-//      with real Razorpay SDK calls, following:
-//      https://razorpay.com/docs/payments/server-integration/nodejs/
-// ------------------------------------------------------------------
+const isConfigured = () =>
+  Boolean(
+    config.payment.keyId &&
+    config.payment.keySecret
+  );
 
-const isConfigured = () => Boolean(config.payment.keyId && config.payment.keySecret);
+let razorpay = null;
 
-// POST /api/payments/create  (public — called from the checkout page)
-// Creates a gateway order for a given internal order and returns what the
-// frontend needs to open the payment widget.
+if (isConfigured()) {
+  razorpay = new Razorpay({
+    key_id: config.payment.keyId,
+    key_secret: config.payment.keySecret,
+  });
+}
+
+const ORDER_SELECT = `
+  SELECT
+    o.*,
+    a.name AS assigned_to_name
+  FROM orders o
+  LEFT JOIN admins a ON a.id = o.assigned_to
+`;
+
+/**
+ * POST /api/payments/create
+ *
+ * Creates a Razorpay order for an internal order.
+ */
 async function createPayment(req, res, next) {
   try {
-    const { order_id } = req.body;
-    if (!order_id) return error(res, 'order_id is required', 422);
+    const {
+      customer_name,
+      customer_email,
+      customer_phone,
+      customer_address,
+      service_id,
+    } = req.body;
 
-    const [orderRows] = await pool.query('SELECT * FROM orders WHERE id = ?', [order_id]);
-    const order = orderRows[0];
-    if (!order) return error(res, 'Order not found', 404);
-    if (order.payment_status === 'paid') {
-      return error(res, 'This order has already been paid', 409);
+    const name = String(customer_name || '').trim();
+    const email = String(customer_email || '')
+      .trim()
+      .toLowerCase();
+    const phone = String(customer_phone || '').trim();
+    const address = String(customer_address || '').trim();
+
+    if (!name || !email || !phone || !service_id) {
+      return error(
+        res,
+        'Name, email, phone and service are required',
+        422
+      );
     }
 
-    let gatewayOrderId;
-
-    if (isConfigured()) {
-      // TODO (live gateway): replace with a real Razorpay order creation call, e.g.:
-      //
-      //   const Razorpay = require('razorpay');
-      //   const razorpay = new Razorpay({ key_id: config.payment.keyId, key_secret: config.payment.keySecret });
-      //   const gatewayOrder = await razorpay.orders.create({
-      //     amount: Math.round(order.amount * 100), // paise
-      //     currency: 'INR',
-      //     receipt: order.order_number,
-      //   });
-      //   gatewayOrderId = gatewayOrder.id;
-      gatewayOrderId = `rzp_order_${order.order_number}`;
-    } else {
-      // No live credentials yet — placeholder id so the flow can still be tested end-to-end.
-      gatewayOrderId = `test_order_${order.order_number}`;
+    if (!config.payment.keyId || !config.payment.keySecret) {
+      return error(
+        res,
+        'Payment gateway is not configured',
+        503
+      );
     }
 
-    await pool.query(
-      `INSERT INTO payments (order_id, gateway_order_id, amount, status)
-       VALUES (?, ?, ?, 'pending')`,
-      [order.id, gatewayOrderId, order.amount]
+    /*
+     * Get the service directly from DB.
+     *
+     * NEVER trust price sent by frontend.
+     */
+    const [serviceRows] = await pool.query(
+      `
+        SELECT
+          id,
+          title,
+          price
+        FROM services
+        WHERE id = ?
+          AND is_active = 1
+        LIMIT 1
+      `,
+      [service_id]
     );
 
-    return success(res, {
-      order_id: order.id,
-      order_number: order.order_number,
-      amount: order.amount,
-      currency: 'INR',
-      gateway_order_id: gatewayOrderId,
-      key_id: config.payment.keyId || null,
-      test_mode: !isConfigured(),
-    }, 'Payment initialized');
+    const service = serviceRows[0];
+
+    if (!service) {
+      return error(
+        res,
+        'Selected service is not available',
+        404
+      );
+    }
+
+    if (
+      service.price === null ||
+      Number(service.price) <= 0
+    ) {
+      return error(
+        res,
+        'This service cannot be purchased online',
+        422
+      );
+    }
+
+    /*
+     * Create Razorpay order ONLY.
+     *
+     * No internal `orders` row is created here.
+     */
+    const gatewayOrder =
+      await razorpay.orders.create({
+        amount: Math.round(
+          Number(service.price) * 100
+        ),
+
+        currency: 'INR',
+
+        receipt: `PAY-${Date.now()}`,
+
+        notes: {
+          service_id: String(service.id),
+          service_title: service.title,
+          customer_email: email,
+        },
+      });
+
+    return success(
+      res,
+      {
+        amount: service.price,
+        currency: 'INR',
+
+        gateway_order_id:
+          gatewayOrder.id,
+
+        key_id:
+          config.payment.keyId,
+
+        service_id:
+          service.id,
+
+        service_title:
+          service.title,
+      },
+      'Payment initialized'
+    );
   } catch (err) {
+    console.error(
+      '[payment] create error:',
+      err
+    );
+
     next(err);
   }
 }
 
-// POST /api/payments/webhook  (called by the payment gateway, not the browser)
-// The ONLY place an order is marked as paid. A frontend "success" redirect
-// is never trusted on its own — this handler verifies the signature/payload
-// from the gateway before updating anything.
-async function handleWebhook(req, res, next) {
+async function verifyPayment(req, res, next) {
   try {
-    if (isConfigured()) {
-      // TODO (live gateway): verify the Razorpay webhook signature before
-      // trusting the payload, e.g.:
-      //
-      //   const signature = req.headers['x-razorpay-signature'];
-      //   const expected = crypto
-      //     .createHmac('sha256', config.payment.keySecret)
-      //     .update(JSON.stringify(req.body))
-      //     .digest('hex');
-      //   if (signature !== expected) return error(res, 'Invalid webhook signature', 400);
-      const signature = req.headers['x-razorpay-signature'];
-      if (!signature) {
-        return error(res, 'Missing webhook signature', 400);
-      }
+    const {
+      customer_name,
+      customer_email,
+      customer_phone,
+      customer_address,
+      service_id,
+      razorpay_order_id,
+      razorpay_payment_id,
+      razorpay_signature,
+    } = req.body;
+
+    /*
+     * Basic verification input validation.
+     */
+    if (
+      !customer_name ||
+      !customer_email ||
+      !customer_phone ||
+      !service_id ||
+      !razorpay_order_id ||
+      !razorpay_payment_id ||
+      !razorpay_signature
+    ) {
+      return error(
+        res,
+        'Payment verification data is incomplete',
+        422
+      );
     }
 
-    const { gateway_order_id, payment_id, status, payment_method } = req.body;
-    if (!gateway_order_id || !status) {
-      return error(res, 'gateway_order_id and status are required', 422);
+    /*
+     * Make sure Razorpay is configured.
+     */
+    if (
+      !config.payment.keyId ||
+      !config.payment.keySecret
+    ) {
+      return error(
+        res,
+        'Payment gateway is not configured',
+        503
+      );
     }
 
-    const [paymentRows] = await pool.query(
-      'SELECT * FROM payments WHERE gateway_order_id = ? ORDER BY created_at DESC LIMIT 1',
-      [gateway_order_id]
+    /*
+     * --------------------------------------------------
+     * 1. Verify Razorpay signature
+     * --------------------------------------------------
+     */
+    const generatedSignature = crypto
+      .createHmac(
+        'sha256',
+        config.payment.keySecret
+      )
+      .update(
+        `${razorpay_order_id}|${razorpay_payment_id}`
+      )
+      .digest('hex');
+
+    const signatureBuffer =
+      Buffer.from(generatedSignature);
+
+    const receivedSignatureBuffer =
+      Buffer.from(razorpay_signature);
+
+    if (
+      signatureBuffer.length !==
+      receivedSignatureBuffer.length ||
+      !crypto.timingSafeEqual(
+        signatureBuffer,
+        receivedSignatureBuffer
+      )
+    ) {
+      return error(
+        res,
+        'Invalid payment signature',
+        400
+      );
+    }
+
+    /*
+     * --------------------------------------------------
+     * 2. Fetch actual payment from Razorpay
+     * --------------------------------------------------
+     *
+     * Never trust payment status/amount
+     * directly from the frontend.
+     */
+    const razorpayPayment =
+      await razorpay.payments.fetch(
+        razorpay_payment_id
+      );
+
+    /*
+     * --------------------------------------------------
+     * 3. Verify payment belongs to this Razorpay order
+     * --------------------------------------------------
+     */
+    if (
+      razorpayPayment.order_id !==
+      razorpay_order_id
+    ) {
+      return error(
+        res,
+        'Payment order mismatch',
+        400
+      );
+    }
+
+    /*
+     * --------------------------------------------------
+     * 4. Verify service and amount
+     * --------------------------------------------------
+     *
+     * We get the price from OUR database.
+     */
+    const [serviceRows] = await pool.query(
+      `
+        SELECT
+          id,
+          title,
+          price
+        FROM services
+        WHERE id = ?
+          AND is_active = 1
+        LIMIT 1
+      `,
+      [service_id]
     );
-    const payment = paymentRows[0];
-    if (!payment) return error(res, 'Payment record not found for this gateway order', 404);
 
-    const normalizedStatus = ['pending', 'paid', 'failed', 'refunded'].includes(status)
-      ? status
-      : 'pending';
+    const service = serviceRows[0];
 
-    await pool.query(
-      `UPDATE payments SET payment_id = ?, status = ?, payment_method = ? WHERE id = ?`,
-      [payment_id || null, normalizedStatus, payment_method || null, payment.id]
+    if (!service) {
+      return error(
+        res,
+        'Selected service is no longer available',
+        404
+      );
+    }
+
+    /*
+     * This service must have a valid online price.
+     */
+    if (
+      service.price === null ||
+      Number(service.price) <= 0
+    ) {
+      return error(
+        res,
+        'This service cannot be purchased online',
+        422
+      );
+    }
+
+    const expectedAmount =
+      Math.round(
+        Number(service.price) * 100
+      );
+
+    if (
+      Number(razorpayPayment.amount) !==
+      expectedAmount
+    ) {
+      console.error(
+        `[payment] Amount mismatch | expected=${expectedAmount} | received=${razorpayPayment.amount}`
+      );
+
+      return error(
+        res,
+        'Payment amount mismatch',
+        400
+      );
+    }
+
+    /*
+     * --------------------------------------------------
+     * 5. Only captured payments can create orders
+     * --------------------------------------------------
+     */
+    if (
+      razorpayPayment.status !==
+      'captured'
+    ) {
+      return error(
+        res,
+        `Payment is not captured. Current status: ${razorpayPayment.status}`,
+        400
+      );
+    }
+
+    /*
+     * --------------------------------------------------
+     * 6. Payment is fully verified.
+     *
+     * Hand control to createOrder().
+     *
+     * IMPORTANT:
+     * We mark these values as verified internally.
+     * createOrder() contains ALL order creation logic.
+     * --------------------------------------------------
+     */
+    req.verifiedPayment = {
+      razorpay_order_id,
+      razorpay_payment_id,
+      razorpay_payment_method:
+        razorpayPayment.method || null,
+      amount: Number(service.price),
+    };
+
+    /*
+     * Also pass the verified service information so
+     * createOrder() doesn't need to trust frontend data.
+     */
+    req.verifiedService = service;
+
+    /*
+     * createOrder() will now:
+     *
+     * - validate customer
+     * - assign staff
+     * - generate order number
+     * - create order
+     * - mark payment as paid
+     * - mark order as confirmed
+     * - store Razorpay references
+     */
+    return createOrder(
+      req,
+      res,
+      next
     );
 
-    const newOrderStatus = normalizedStatus === 'paid' ? 'confirmed' : undefined;
-
-    await pool.query(
-      `UPDATE orders SET payment_status = ? ${newOrderStatus ? ', order_status = ?' : ''} WHERE id = ?`,
-      newOrderStatus
-        ? [normalizedStatus, newOrderStatus, payment.order_id]
-        : [normalizedStatus, payment.order_id]
-    );
-
-    return success(res, null, 'Webhook processed');
   } catch (err) {
+    console.error(
+      '[payment] verification error:',
+      err
+    );
+
     next(err);
   }
 }
 
-module.exports = { createPayment, handleWebhook };
+
+module.exports = {
+  createPayment,
+  verifyPayment,
+};

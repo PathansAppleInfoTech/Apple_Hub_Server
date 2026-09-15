@@ -4,7 +4,7 @@
 
 require('dotenv').config();
 
-const required = ['DB_HOST', 'DB_NAME', 'DB_USER', 'DB_PASSWORD', 'JWT_ACCESS_SECRET', 'JWT_REFRESH_SECRET'];
+const required = ['DB_HOST', 'DB_NAME', 'DB_USER', 'DB_PASSWORD', 'JWT_ACCESS_SECRET', 'JWT_REFRESH_SECRET','PAYMENT_KEY_ID','PAYMENT_KEY_SECRET'];
 const missing = required.filter((key) => !process.env[key]);
 
 if (missing.length > 0 && process.env.NODE_ENV !== 'test') {
@@ -40,5 +40,6 @@ module.exports = {
   payment: {
     keyId: process.env.PAYMENT_KEY_ID || '',
     keySecret: process.env.PAYMENT_KEY_SECRET || '',
+    webhookSecret: process.env.PAYMENT_WEBHOOK_SECRET || '',
   },
 };
