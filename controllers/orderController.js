@@ -511,7 +511,13 @@ async function listOrders(req, res, next) {
     const clauses = [];
     const params = [];
 
-    if (req.admin.role === 'staff') {
+    // Admin can see all orders.
+    // Executive and Technical can see only orders assigned to them.
+    const restrictedScope = ['executive', 'technical'].includes(
+      req.admin.role
+    );
+
+    if (restrictedScope) {
       clauses.push('o.assigned_to = ?');
       params.push(req.admin.id);
     }
@@ -554,15 +560,15 @@ async function listOrders(req, res, next) {
 
       if (searchTerm) {
         clauses.push(`
-          (
-            o.order_number LIKE ?
-            OR o.customer_name LIKE ?
-            OR o.customer_email LIKE ?
-            OR o.customer_phone LIKE ?
+  (
+    o.order_number LIKE ?
+    OR o.customer_name LIKE ?
+    OR o.customer_email LIKE ?
+    OR o.customer_phone LIKE ?
           )
-        `);
+  `);
 
-        const value = `%${searchTerm}%`;
+        const value = `% ${ searchTerm }% `;
 
         params.push(
           value,
@@ -574,14 +580,14 @@ async function listOrders(req, res, next) {
     }
 
     const where = clauses.length
-      ? `WHERE ${clauses.join(' AND ')}`
+      ? `WHERE ${ clauses.join(' AND ') } `
       : '';
 
     const sql = `
-      ${ORDER_SELECT}
-      ${where}
+      ${ ORDER_SELECT }
+      ${ where }
       ORDER BY o.created_at DESC
-    `;
+  `;
 
     const [rows] = await pool.query(
       sql,
@@ -593,7 +599,6 @@ async function listOrders(req, res, next) {
     next(err);
   }
 }
-
 
 // GET /api/admin/orders/:id
 async function getOrderDetail(req, res, next) {
@@ -638,7 +643,7 @@ async function getOrderDetail(req, res, next) {
     if (
       req.admin.role === 'staff' &&
       Number(order.assigned_to) !==
-        Number(req.admin.id)
+      Number(req.admin.id)
     ) {
       return error(
         res,

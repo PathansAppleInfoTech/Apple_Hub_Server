@@ -12,6 +12,9 @@ const SAFE_FIELDS = `
   updated_at
 `;
 
+// Allowed team roles
+const ALLOWED_ROLES = ['admin', 'executive', 'technical'];
+
 // GET /api/admin/team
 async function listTeam(req, res, next) {
   try {
@@ -33,10 +36,13 @@ async function createTeamMember(req, res, next) {
     const name = String(req.body.name || '').trim();
     const email = String(req.body.email || '').trim().toLowerCase();
     const password = String(req.body.password || '');
-    const role = req.body.role === 'admin' ? 'admin' : 'staff';
 
-    // Convert active status safely to 0 or 1
-    const is_active = Number(req.body.is_active) === 1 ? 1 : 0;
+    const role = ALLOWED_ROLES.includes(req.body.role)
+      ? req.body.role
+      : 'executive';
+
+    const is_active =
+      Number(req.body.is_active) === 1 ? 1 : 0;
 
     if (!name || !email || !password) {
       return error(
@@ -80,7 +86,15 @@ async function createTeamMember(req, res, next) {
       );
     }
 
-    // Check duplicate email before attempting insert
+    if (!ALLOWED_ROLES.includes(role)) {
+      return error(
+        res,
+        'Please select a valid role',
+        422
+      );
+    }
+
+    // Check duplicate email
     const [existingRows] = await pool.query(
       'SELECT id FROM admins WHERE email = ? LIMIT 1',
       [email]
@@ -96,12 +110,6 @@ async function createTeamMember(req, res, next) {
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    /*
-     * IMPORTANT:
-     * Do NOT hard-code is_active to 1.
-     *
-     * Use the value received from the frontend.
-     */
     const [result] = await pool.query(
       `
         INSERT INTO admins
@@ -138,7 +146,6 @@ async function createTeamMember(req, res, next) {
       201
     );
   } catch (err) {
-    // MySQL duplicate-key fallback
     if (err.code === 'ER_DUP_ENTRY') {
       return error(
         res,
@@ -151,15 +158,19 @@ async function createTeamMember(req, res, next) {
   }
 }
 
-
-
 // PUT /api/admin/team/:id
 async function updateTeamMember(req, res, next) {
   try {
     const { id } = req.params;
 
     const [existingRows] = await pool.query(
-      `SELECT id, name, email, password, role, is_active
+      `SELECT
+         id,
+         name,
+         email,
+         password,
+         role,
+         is_active
        FROM admins
        WHERE id = ?
        LIMIT 1`,
@@ -169,7 +180,11 @@ async function updateTeamMember(req, res, next) {
     const existing = existingRows[0];
 
     if (!existing) {
-      return error(res, 'Team member not found', 404);
+      return error(
+        res,
+        'Team member not found',
+        404
+      );
     }
 
     const name =
@@ -183,7 +198,7 @@ async function updateTeamMember(req, res, next) {
         : existing.email;
 
     const role =
-      req.body.role === 'admin' || req.body.role === 'staff'
+      req.body.role !== undefined
         ? req.body.role
         : existing.role;
 
@@ -200,26 +215,61 @@ async function updateTeamMember(req, res, next) {
         : '';
 
     if (!name) {
-      return error(res, 'Name is required', 422);
+      return error(
+        res,
+        'Name is required',
+        422
+      );
     }
 
     if (name.length < 2) {
-      return error(res, 'Name must be at least 2 characters', 422);
+      return error(
+        res,
+        'Name must be at least 2 characters',
+        422
+      );
+    }
+
+    if (name.length > 120) {
+      return error(
+        res,
+        'Name is too long',
+        422
+      );
     }
 
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
     if (!emailRegex.test(email)) {
-      return error(res, 'Please enter a valid email address', 422);
+      return error(
+        res,
+        'Please enter a valid email address',
+        422
+      );
+    }
+
+    if (!ALLOWED_ROLES.includes(role)) {
+      return error(
+        res,
+        'Please select a valid role',
+        422
+      );
     }
 
     if (password && password.length < 8) {
-      return error(res, 'Password must be at least 8 characters', 422);
+      return error(
+        res,
+        'Password must be at least 8 characters',
+        422
+      );
     }
 
-    // Prevent the currently logged-in admin from disabling
+    // Prevent currently logged-in admin from disabling
     // their own account.
-    if (Number(id) === Number(req.admin.id) && isActive === 0) {
+    if (
+      Number(id) === Number(req.admin.id) &&
+      isActive === 0
+    ) {
       return error(
         res,
         'You cannot deactivate your own account',
@@ -227,7 +277,7 @@ async function updateTeamMember(req, res, next) {
       );
     }
 
-    // Check whether another account already uses this email
+    // Check duplicate email
     const [duplicateRows] = await pool.query(
       `SELECT id
        FROM admins
@@ -248,7 +298,10 @@ async function updateTeamMember(req, res, next) {
     let hashedPassword = existing.password;
 
     if (password) {
-      hashedPassword = await bcrypt.hash(password, 10);
+      hashedPassword = await bcrypt.hash(
+        password,
+        10
+      );
     }
 
     await pool.query(
@@ -271,10 +324,12 @@ async function updateTeamMember(req, res, next) {
     );
 
     const [rows] = await pool.query(
-      `SELECT ${SAFE_FIELDS}
-       FROM admins
-       WHERE id = ?
-       LIMIT 1`,
+      `
+        SELECT ${SAFE_FIELDS}
+        FROM admins
+        WHERE id = ?
+        LIMIT 1
+      `,
       [id]
     );
 

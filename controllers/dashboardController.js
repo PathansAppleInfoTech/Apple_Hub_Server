@@ -4,13 +4,17 @@ const { success } = require('../utils/apiResponse');
 // GET /api/admin/dashboard
 async function getDashboardStats(req, res, next) {
   try {
-    const staffScope = req.admin.role === 'staff';
+    // Admin can see everything.
+    // Executive and Technical can see only their assigned orders.
+    const restrictedScope = ['executive', 'technical'].includes(
+      req.admin.role
+    );
 
-    const scopeClause = staffScope
+    const scopeClause = restrictedScope
       ? 'WHERE assigned_to = ?'
       : '';
 
-    const scopeParams = staffScope
+    const scopeParams = restrictedScope
       ? [req.admin.id]
       : [];
 
@@ -20,7 +24,7 @@ async function getDashboardStats(req, res, next) {
         SELECT COUNT(*) AS total
         FROM services
         WHERE is_active = 1
-      `
+  `
     );
 
     // Total active categories
@@ -29,7 +33,7 @@ async function getDashboardStats(req, res, next) {
         SELECT COUNT(*) AS total
         FROM categories
         WHERE is_active = 1
-      `
+  `
     );
 
     // Total orders
@@ -37,8 +41,8 @@ async function getDashboardStats(req, res, next) {
       `
         SELECT COUNT(*) AS total
         FROM orders
-        ${scopeClause}
-      `,
+        ${ scopeClause }
+`,
       scopeParams
     );
 
@@ -47,41 +51,46 @@ async function getDashboardStats(req, res, next) {
       `
         SELECT COALESCE(SUM(amount), 0) AS total
         FROM orders
-        ${scopeClause
-        ? `${scopeClause} AND`
-        : 'WHERE'
-      }
-        payment_status = 'paid'
-      `,
+        ${
+  scopeClause
+    ? `${scopeClause} AND`
+    : 'WHERE'
+}
+payment_status = 'paid'
+  `,
       scopeParams
     );
 
     // Recent orders
     const [recentOrders] = await pool.query(
       `
-        SELECT
-          o.*,
-          a.name AS assigned_to_name
+SELECT
+o.*,
+  a.name AS assigned_to_name
         FROM orders o
         LEFT JOIN admins a
           ON a.id = o.assigned_to
-        ${scopeClause}
+        ${
+  restrictedScope
+    ? 'WHERE o.assigned_to = ?'
+    : ''
+}
         ORDER BY o.created_at DESC
         LIMIT 8
-      `,
+  `,
       scopeParams
     );
 
     // Order status distribution
     const [statusSummary] = await pool.query(
       `
-        SELECT
-          order_status,
-          COUNT(*) AS total
+SELECT
+order_status,
+  COUNT(*) AS total
         FROM orders
-        ${scopeClause}
+        ${ scopeClause }
         GROUP BY order_status
-      `,
+  `,
       scopeParams
     );
 
@@ -103,6 +112,7 @@ async function getDashboardStats(req, res, next) {
     next(err);
   }
 }
+
 
 module.exports = {
   getDashboardStats,
