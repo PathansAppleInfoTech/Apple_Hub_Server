@@ -4,7 +4,23 @@
 
 require('dotenv').config();
 
-const required = ['DB_HOST', 'DB_NAME', 'DB_USER', 'DB_PASSWORD', 'JWT_ACCESS_SECRET', 'JWT_REFRESH_SECRET','PAYMENT_KEY_ID','PAYMENT_KEY_SECRET'];
+const required = [
+  'DB_HOST',
+  'DB_NAME',
+  'DB_USER',
+  'DB_PASSWORD',
+  'JWT_ACCESS_SECRET',
+  'JWT_REFRESH_SECRET',
+  'PAYMENT_KEY_ID',
+  'PAYMENT_KEY_SECRET',
+  'SMTP_HOST',
+  'SMTP_PORT',
+  'SMTP_SECURE',
+  'SMTP_USER',
+  'SMTP_PASS',
+  'MAIL_FROM_NAME',
+  'MAIL_FROM_EMAIL'
+];
 const missing = required.filter((key) => !process.env[key]);
 
 if (missing.length > 0 && process.env.NODE_ENV !== 'test') {

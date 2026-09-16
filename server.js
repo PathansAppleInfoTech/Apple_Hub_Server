@@ -7,6 +7,7 @@ const path = require('path');
 const config = require('./config/env');
 const { testConnection } = require('./config/db');
 const { notFound, errorHandler } = require('./middleware/errorHandler');
+const { verifyMailer } = require('./utils/mailer');
 
 const authRoutes = require('./routes/authRoutes');
 const categoryRoutes = require('./routes/categoryRoutes');
@@ -61,4 +62,5 @@ app.use(errorHandler);
 app.listen(config.port, () => {
   console.log(`[server] Pathans Apple Services API running on port ${config.port} (${config.nodeEnv})`);
   testConnection();
+  verifyMailer();
 });

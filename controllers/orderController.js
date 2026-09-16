@@ -2,6 +2,7 @@ const { pool } = require('../config/db');
 const { success, error } = require('../utils/apiResponse');
 const { generateOrderNumber } = require('../utils/generateOrderNumber');
 const { getNextStaffForOrder } = require('../utils/getNextStaff');
+const { sendOrderConfirmationEmail } = require('../utils/mailer');
 
 const ORDER_SELECT = `
   SELECT
@@ -354,25 +355,44 @@ async function createOrder(req, res, next) {
       rows[0];
 
     console.log(
-      `[order] CREATED | order=${orderNumber} | payment=${verifiedPayment.razorpay_payment_id} | razorpay_order=${verifiedPayment.razorpay_order_id} | assigned=${assignedStaff?.name || 'unassigned'}`
+      `[order] CREATED | order=${orderNumber} | payment=${verifiedPayment.razorpay_payment_id} | razorpay_order=${verifiedPayment.razorpay_order_id} | assigned=${assignedStaff?.name || 'unassigned'} `
     );
 
     /*
      * --------------------------------------------------
-     * Return the order to verifyPayment()
+     * Send customer confirmation email
      * --------------------------------------------------
      *
-     * Since createOrder() is called internally by
-     * verifyPayment(), this response goes directly
-     * back to the frontend.
+     * IMPORTANT:
+     * The database transaction has already been
+     * committed at this point.
+     *
+     * Therefore an email failure must NOT cause the
+     * successfully created order to fail.
      * --------------------------------------------------
      */
+    try {
+      await sendOrderConfirmationEmail(
+        createdOrder
+      );
+
+      console.log(
+        `[order] Confirmation email sent | order=${orderNumber} | email=${email} `
+      );
+    } catch (emailError) {
+      console.error(
+        `[order] Order created but confirmation email failed | order=${orderNumber} | email=${email} `,
+        emailError
+      );
+    }
+
     return success(
       res,
       createdOrder,
       'Payment verified and order created',
       201
     );
+
 
   } catch (err) {
     try {
@@ -580,6 +600,11 @@ async function getOrderDetail(req, res, next) {
   try {
     const { id } = req.params;
 
+    /*
+     * --------------------------------------------------
+     * Get order
+     * --------------------------------------------------
+     */
     const [rows] = await pool.query(
       `
         ${ORDER_SELECT}
@@ -599,9 +624,21 @@ async function getOrderDetail(req, res, next) {
       );
     }
 
+    /*
+     * --------------------------------------------------
+     * Staff access restriction
+     * --------------------------------------------------
+     *
+     * Admins can view every order.
+     *
+     * Staff can only view orders automatically
+     * assigned to them.
+     * --------------------------------------------------
+     */
     if (
       req.admin.role === 'staff' &&
-      Number(order.assigned_to) !== Number(req.admin.id)
+      Number(order.assigned_to) !==
+        Number(req.admin.id)
     ) {
       return error(
         res,
@@ -610,33 +647,27 @@ async function getOrderDetail(req, res, next) {
       );
     }
 
-    const [payments] = await pool.query(
-      `
-        SELECT
-          id,
-          order_id,
-          gateway_order_id,
-          payment_id,
-          amount,
-          status,
-          payment_method,
-          created_at,
-          updated_at
-        FROM payments
-        WHERE order_id = ?
-        ORDER BY created_at DESC
-      `,
-      [id]
+    /*
+     * --------------------------------------------------
+     * Payment information is now stored directly
+     * in the orders table.
+     *
+     * No payments table is used anymore.
+     * --------------------------------------------------
+     */
+
+    return success(res, order);
+
+  } catch (err) {
+    console.error(
+      '[admin/orders] Failed to get order detail:',
+      err
     );
 
-    return success(res, {
-      ...order,
-      payments,
-    });
-  } catch (err) {
     next(err);
   }
 }
+
 
 
 // PUT /api/admin/orders/:id/status
