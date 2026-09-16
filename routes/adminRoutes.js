@@ -8,6 +8,8 @@ const {
   listOrders,
   getOrderDetail,
   updateOrderStatus,
+  listAssignableStaff,
+  assignOrder,
 } = require('../controllers/orderController');
 const { listTeam, createTeamMember, updateTeamMember } = require('../controllers/teamController');
 
@@ -20,7 +22,9 @@ router.get('/categories', requireRole('admin'), listAllCategories);
 router.get('/services', requireRole('admin'), listAllServices);
 
 router.get('/orders', listOrders); // admins see all, staff see only their assigned orders
+router.get('/orders/assignable-staff', listAssignableStaff);
 router.get('/orders/:id', getOrderDetail);
+router.put('/orders/:id/assign', assignOrder);
 router.put('/orders/:id/status', updateOrderStatus);
 
 router.get('/team', requireRole('admin'), listTeam);
