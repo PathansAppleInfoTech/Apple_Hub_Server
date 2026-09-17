@@ -53,6 +53,7 @@ const VALID_ORDER_STATUSES = [
 
 // POST /api/orders
 // Public — customer checkout
+
 async function createOrder(req, res, next) {
   const connection = await pool.getConnection();
 
@@ -78,13 +79,9 @@ async function createOrder(req, res, next) {
     /*
      * --------------------------------------------------
      * Payment must already be verified.
-     *
-     * This prevents someone from directly calling
-     * POST /api/orders and creating a paid order.
      * --------------------------------------------------
      */
     const verifiedPayment = req.verifiedPayment;
-
     const verifiedService = req.verifiedService;
 
     if (
@@ -161,23 +158,24 @@ async function createOrder(req, res, next) {
      * --------------------------------------------------
      * Get and lock the service.
      *
-     * Even though verifyPayment already checked it,
-     * check it again inside the order transaction.
+     * We fetch the tax settings here as well.
      * --------------------------------------------------
      */
     const [serviceRows] =
       await connection.query(
         `
-SELECT
-id,
-  title,
-  price
-          FROM services
-          WHERE id = ?
-  AND is_active = 1
-          LIMIT 1
-          FOR UPDATE
-  `,
+        SELECT
+          id,
+          title,
+          price,
+          tax_type,
+          tax_rate
+        FROM services
+        WHERE id = ?
+          AND is_active = 1
+        LIMIT 1
+        FOR UPDATE
+        `,
         [service_id]
       );
 
@@ -197,6 +195,11 @@ id,
      * --------------------------------------------------
      * Make sure the price has not changed between
      * payment verification and order creation.
+     *
+     * IMPORTANT:
+     *
+     * service.price is already the FINAL price,
+     * including GST when applicable.
      * --------------------------------------------------
      */
     const verifiedAmount =
@@ -205,14 +208,26 @@ id,
     const currentServiceAmount =
       Number(service.price);
 
+    /*
+     * Avoid floating point comparison problems.
+     *
+     * Razorpay amount is in paise.
+     * Convert both to paise for comparison.
+     */
+    const verifiedAmountPaise =
+      Math.round(verifiedAmount * 100);
+
+    const serviceAmountPaise =
+      Math.round(currentServiceAmount * 100);
+
     if (
-      verifiedAmount !==
-      currentServiceAmount
+      verifiedAmountPaise !==
+      serviceAmountPaise
     ) {
       await connection.rollback();
 
       console.error(
-        `[order] Price changed after payment verification | payment=${verifiedPayment.razorpay_payment_id} `
+        `[order] Price changed after payment verification | payment=${verifiedPayment.razorpay_payment_id} | verified=${verifiedAmount} | current=${currentServiceAmount}`
       );
 
       return error(
@@ -224,6 +239,96 @@ id,
 
     /*
      * --------------------------------------------------
+     * TAX CALCULATION
+     *
+     * Dashboard price is already GST-inclusive.
+     *
+     * Example:
+     *
+     * Final amount = ₹1180
+     * GST rate     = 18%
+     *
+     * Taxable amount:
+     *
+     * 1180 / 1.18 = 1000
+     *
+     * GST:
+     *
+     * 1180 - 1000 = 180
+     * --------------------------------------------------
+     */
+
+    const totalAmount =
+      Number(currentServiceAmount);
+
+    const taxType =
+      service.tax_type === 'included'
+        ? 'included'
+        : 'not_applicable';
+
+    let taxRate = null;
+    let taxableAmount = totalAmount;
+    let taxAmount = 0;
+
+    if (taxType === 'included') {
+      taxRate = Number(service.tax_rate);
+
+      if (
+        !Number.isFinite(taxRate) ||
+        taxRate <= 0 ||
+        taxRate > 100
+      ) {
+        await connection.rollback();
+
+        console.error(
+          `[order] Invalid tax configuration | service=${service.id} | tax_type=${service.tax_type} | tax_rate=${service.tax_rate}`
+        );
+
+        return error(
+          res,
+          'Invalid tax configuration for this service. Please contact support.',
+          500
+        );
+      }
+
+      /*
+       * Derive the GST portion from the FINAL
+       * GST-inclusive amount.
+       *
+       * Example:
+       * ₹1180 / 1.18 = ₹1000
+       */
+      taxableAmount =
+        totalAmount / (1 + taxRate / 100);
+
+      taxAmount =
+        totalAmount - taxableAmount;
+
+      /*
+       * Keep currency values to 2 decimals.
+       */
+      taxableAmount =
+        Math.round(
+          taxableAmount * 100
+        ) / 100;
+
+      taxAmount =
+        Math.round(
+          taxAmount * 100
+        ) / 100;
+
+      /*
+       * Ensure the rounded components always
+       * add back to the actual paid amount.
+       */
+      taxAmount =
+        Math.round(
+          (totalAmount - taxableAmount) * 100
+        ) / 100;
+    }
+
+    /*
+     * --------------------------------------------------
      * Prevent duplicate order creation
      * --------------------------------------------------
      */
@@ -231,13 +336,13 @@ id,
       existingOrderRows,
     ] = await connection.query(
       `
-SELECT
-id,
-  order_number
-        FROM orders
-        WHERE razorpay_payment_id = ?
-  LIMIT 1
-    `,
+      SELECT
+        id,
+        order_number
+      FROM orders
+      WHERE razorpay_payment_id = ?
+      LIMIT 1
+      `,
       [
         verifiedPayment.razorpay_payment_id,
       ]
@@ -252,16 +357,16 @@ id,
         existingOrderRows[0];
 
       /*
-       * Fetch the complete existing order.
+       * Fetch complete existing order.
        */
       const [
         existingRows,
       ] = await pool.query(
         `
-          ${ORDER_SELECT}
-          WHERE o.id = ?
-  LIMIT 1
-    `,
+        ${ORDER_SELECT}
+        WHERE o.id = ?
+        LIMIT 1
+        `,
         [existingOrder.id]
       );
 
@@ -281,8 +386,6 @@ id,
      *
      * assigned_executive = NULL
      * assigned_technical = NULL
-     *
-     * They will be assigned later from the admin panel.
      * --------------------------------------------------
      */
 
@@ -296,49 +399,51 @@ id,
 
     /*
      * --------------------------------------------------
-     * Create the actual order.
-     *
-     * IMPORTANT:
-     *
-     * This is the ONLY place where the orders table
-     * gets a new customer order.
-     *
-     * It happens AFTER Razorpay verification.
+     * Create order
      * --------------------------------------------------
      */
     const [result] =
       await connection.query(
         `
-          INSERT INTO orders
-  (
-    order_number,
-    customer_name,
-    customer_email,
-    customer_phone,
-    customer_address,
-    service_id,
-    service_title,
-    amount,
+        INSERT INTO orders
+        (
+          order_number,
+          customer_name,
+          customer_email,
+          customer_phone,
+          customer_address,
 
-    razorpay_order_id,
-    razorpay_payment_id,
+          service_id,
+          service_title,
 
-    assigned_executive,
-    assigned_technical,
+          amount,
 
-    payment_status,
-    order_status
-  )
-VALUES
-  (
-            ?, ?, ?, ?, ?, ?, ?, ?,
-            ?, ?,
-    NULL,
-    NULL,
-    'paid',
-    'confirmed'
-  )
-  `,
+          tax_type,
+          tax_rate,
+          taxable_amount,
+          tax_amount,
+
+          razorpay_order_id,
+          razorpay_payment_id,
+
+          assigned_executive,
+          assigned_technical,
+
+          payment_status,
+          order_status
+        )
+        VALUES
+        (
+          ?, ?, ?, ?, ?,
+          ?, ?, ?,
+          ?, ?, ?, ?,
+          ?, ?,
+          NULL,
+          NULL,
+          'paid',
+          'confirmed'
+        )
+        `,
         [
           orderNumber,
 
@@ -349,7 +454,19 @@ VALUES
 
           service.id,
           service.title,
-          service.price,
+
+          /*
+           * This is the FINAL amount paid by customer.
+           */
+          totalAmount,
+
+          /*
+           * Tax snapshot
+           */
+          taxType,
+          taxRate,
+          taxableAmount,
+          taxAmount,
 
           verifiedPayment.razorpay_order_id,
           verifiedPayment.razorpay_payment_id,
@@ -371,10 +488,10 @@ VALUES
     const [rows] =
       await pool.query(
         `
-          ${ORDER_SELECT}
-          WHERE o.id = ?
-  LIMIT 1
-    `,
+        ${ORDER_SELECT}
+        WHERE o.id = ?
+        LIMIT 1
+        `,
         [result.insertId]
       );
 
@@ -382,15 +499,15 @@ VALUES
       rows[0];
 
     console.log(
-      `[order] CREATED | order=${orderNumber} | payment=${verifiedPayment.razorpay_payment_id} | razorpay_order=${verifiedPayment.razorpay_order_id} | executive=unassigned | technical=unassigned`
+      `[order] CREATED | order=${orderNumber} | payment=${verifiedPayment.razorpay_payment_id} | razorpay_order=${verifiedPayment.razorpay_order_id} | amount=${totalAmount} | tax_type=${taxType} | tax_rate=${taxRate ?? 0} | taxable=${taxableAmount} | tax=${taxAmount} | executive=unassigned | technical=unassigned`
     );
 
     /*
      * --------------------------------------------------
      * Send customer confirmation email
-     * --------------------------------------------------
      *
      * Database transaction has already been committed.
+     *
      * Email failure must NOT fail the order.
      * --------------------------------------------------
      */
@@ -400,11 +517,11 @@ VALUES
       );
 
       console.log(
-        `[order] Confirmation email sent | order=${orderNumber} | email=${email} `
+        `[order] Confirmation email sent | order=${orderNumber} | email=${email}`
       );
     } catch (emailError) {
       console.error(
-        `[order] Order created but confirmation email failed | order=${orderNumber} | email=${email} `,
+        `[order] Order created but confirmation email failed | order=${orderNumber} | email=${email}`,
         emailError
       );
     }
@@ -419,7 +536,7 @@ VALUES
   } catch (err) {
     try {
       await connection.rollback();
-    } catch (_) { }
+    } catch (_) {}
 
     /*
      * Duplicate payment ID can happen if two
@@ -433,12 +550,12 @@ VALUES
           existingRows,
         ] = await pool.query(
           `
-SELECT
-id
-            FROM orders
-            WHERE razorpay_payment_id = ?
-  LIMIT 1
-    `,
+          SELECT
+            id
+          FROM orders
+          WHERE razorpay_payment_id = ?
+          LIMIT 1
+          `,
           [
             req.verifiedPayment
               ?.razorpay_payment_id,
@@ -452,10 +569,10 @@ id
             rows,
           ] = await pool.query(
             `
-              ${ORDER_SELECT}
-              WHERE o.id = ?
-  LIMIT 1
-    `,
+            ${ORDER_SELECT}
+            WHERE o.id = ?
+            LIMIT 1
+            `,
             [existingRows[0].id]
           );
 
@@ -485,6 +602,7 @@ id
     connection.release();
   }
 }
+
 
 
 // GET /api/orders/:id

@@ -190,6 +190,11 @@ async function createService(req, res, next) {
       description,
       price,
       price_suffix,
+
+      // NEW TAX FIELDS
+      tax_type,
+      tax_rate,
+
       duration,
       popular,
       features,
@@ -217,12 +222,50 @@ async function createService(req, res, next) {
       );
     }
 
-    if (price !== null && (isNaN(price) || Number(price) < 0)) {
-      return error(res, 'Price must be a valid positive number or null', 422);
+    if (
+      price !== null &&
+      (isNaN(price) || Number(price) < 0)
+    ) {
+      return error(
+        res,
+        'Price must be a valid positive number or null',
+        422
+      );
     }
 
     const cleanTitle = title.trim();
     const slug = slugify(cleanTitle);
+
+    // ----------------------------------------------------------
+    // TAX VALIDATION
+    // ----------------------------------------------------------
+
+    // Default = GST not applicable
+    const normalizedTaxType =
+      tax_type === 'included'
+        ? 'included'
+        : 'not_applicable';
+
+    let normalizedTaxRate = null;
+
+    // If GST is included, a valid GST rate is mandatory
+    if (normalizedTaxType === 'included') {
+      const parsedTaxRate = Number(tax_rate);
+
+      if (
+        !Number.isFinite(parsedTaxRate) ||
+        parsedTaxRate <= 0 ||
+        parsedTaxRate > 100
+      ) {
+        return error(
+          res,
+          'Enter a valid GST rate between 0.01% and 100%.',
+          422
+        );
+      }
+
+      normalizedTaxRate = parsedTaxRate;
+    }
 
     // ----------------------------------------------------------
     // Check duplicate slug
@@ -268,6 +311,8 @@ async function createService(req, res, next) {
         description,
         price,
         price_suffix,
+        tax_type,
+        tax_rate,
         duration,
         popular,
         features,
@@ -276,20 +321,32 @@ async function createService(req, res, next) {
         image,
         is_active
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       [
         category_id || null,
+
         cleanTitle,
         slug,
+
         tier || null,
+
         short_description?.trim() || null,
         description?.trim() || null,
 
         // Custom pricing = NULL
-        price === null ? null : Number(price),
+        price === null
+          ? null
+          : Number(price),
 
         price_suffix?.trim() || null,
+
+        // ------------------------------------------------------
+        // TAX
+        // ------------------------------------------------------
+        normalizedTaxType,
+        normalizedTaxRate,
+
         duration?.trim() || null,
 
         popular ? 1 : 0,
@@ -298,6 +355,7 @@ async function createService(req, res, next) {
         JSON.stringify(cleanNotes),
 
         freebies?.trim() || null,
+
         image || null,
 
         is_active !== undefined
@@ -305,6 +363,10 @@ async function createService(req, res, next) {
           : 1,
       ]
     );
+
+    // ----------------------------------------------------------
+    // Fetch created service
+    // ----------------------------------------------------------
 
     const [rows] = await pool.query(
       `${SERVICE_SELECT} WHERE s.id = ? LIMIT 1`,
@@ -337,9 +399,14 @@ async function createService(req, res, next) {
 // PUT /api/services/:id
 // ============================================================
 
+
 async function updateService(req, res, next) {
   try {
     const { id } = req.params;
+
+    // ----------------------------------------------------------
+    // Get existing service
+    // ----------------------------------------------------------
 
     const [existingRows] = await pool.query(
       'SELECT * FROM services WHERE id = ? LIMIT 1',
@@ -360,6 +427,11 @@ async function updateService(req, res, next) {
       description,
       price,
       price_suffix,
+
+      // NEW TAX FIELDS
+      tax_type,
+      tax_rate,
+
       duration,
       popular,
       features,
@@ -373,8 +445,15 @@ async function updateService(req, res, next) {
     // Validation
     // ----------------------------------------------------------
 
-    if (title !== undefined && !String(title).trim()) {
-      return error(res, 'Service title cannot be empty', 422);
+    if (
+      title !== undefined &&
+      !String(title).trim()
+    ) {
+      return error(
+        res,
+        'Service title cannot be empty',
+        422
+      );
     }
 
     if (
@@ -429,6 +508,53 @@ async function updateService(req, res, next) {
     }
 
     // ----------------------------------------------------------
+    // TAX LOGIC
+    // ----------------------------------------------------------
+
+    /*
+      If tax_type is not supplied:
+      → preserve existing tax_type
+
+      If tax_type = included:
+      → tax_rate must be valid
+
+      If tax_type = not_applicable:
+      → tax_rate becomes NULL
+    */
+
+    const finalTaxType =
+      tax_type !== undefined
+        ? tax_type === 'included'
+          ? 'included'
+          : 'not_applicable'
+        : existing.tax_type || 'not_applicable';
+
+    let finalTaxRate = null;
+
+    if (finalTaxType === 'included') {
+      const taxRateValue =
+        tax_rate !== undefined
+          ? tax_rate
+          : existing.tax_rate;
+
+      const parsedTaxRate = Number(taxRateValue);
+
+      if (
+        !Number.isFinite(parsedTaxRate) ||
+        parsedTaxRate <= 0 ||
+        parsedTaxRate > 100
+      ) {
+        return error(
+          res,
+          'Enter a valid GST rate between 0.01% and 100%.',
+          422
+        );
+      }
+
+      finalTaxRate = parsedTaxRate;
+    }
+
+    // ----------------------------------------------------------
     // Preserve existing JSON data when not supplied
     // ----------------------------------------------------------
 
@@ -462,6 +588,8 @@ async function updateService(req, res, next) {
         description = ?,
         price = ?,
         price_suffix = ?,
+        tax_type = ?,
+        tax_rate = ?,
         duration = ?,
         popular = ?,
         features = ?,
@@ -491,6 +619,10 @@ async function updateService(req, res, next) {
           ? description?.trim() || null
           : existing.description,
 
+        // ------------------------------------------------------
+        // PRICE
+        // ------------------------------------------------------
+
         price !== undefined
           ? price === null
             ? null
@@ -500,6 +632,17 @@ async function updateService(req, res, next) {
         price_suffix !== undefined
           ? price_suffix?.trim() || null
           : existing.price_suffix,
+
+        // ------------------------------------------------------
+        // TAX
+        // ------------------------------------------------------
+
+        finalTaxType,
+        finalTaxRate,
+
+        // ------------------------------------------------------
+        // OTHER FIELDS
+        // ------------------------------------------------------
 
         duration !== undefined
           ? duration?.trim() || null
@@ -527,6 +670,10 @@ async function updateService(req, res, next) {
         id,
       ]
     );
+
+    // ----------------------------------------------------------
+    // Fetch updated service
+    // ----------------------------------------------------------
 
     const [rows] = await pool.query(
       `${SERVICE_SELECT} WHERE s.id = ? LIMIT 1`,
