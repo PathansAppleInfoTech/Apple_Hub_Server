@@ -38,6 +38,7 @@ async function createCategory(req, res, next) {
   try {
     const name = String(req.body.name || '').trim();
     const description = String(req.body.description || '').trim();
+    const imageUrl = String(req.body.image_url || '').trim();
 
     if (!name) {
       return error(res, 'Category name is required', 422);
@@ -53,6 +54,10 @@ async function createCategory(req, res, next) {
 
     if (name.length > 120) {
       return error(res, 'Category name is too long', 422);
+    }
+
+    if (imageUrl && imageUrl.length > 500) {
+      return error(res, 'Category image URL is too long', 422);
     }
 
     const slug = slugify(name);
@@ -76,12 +81,13 @@ async function createCategory(req, res, next) {
 
     const [result] = await pool.query(
       `INSERT INTO categories
-        (name, slug, description, is_active)
-       VALUES (?, ?, ?, 1)`,
+        (name, slug, description, image_url, is_active)
+       VALUES (?, ?, ?, ?, 1)`,
       [
         name,
         slug,
         description || null,
+        imageUrl || null,
       ]
     );
 
@@ -115,7 +121,6 @@ async function createCategory(req, res, next) {
     next(err);
   }
 }
-
 // PUT /api/categories/:id
 async function updateCategory(req, res, next) {
   try {
@@ -145,6 +150,11 @@ async function updateCategory(req, res, next) {
         ? String(req.body.description).trim()
         : existing.description;
 
+    const imageUrl =
+      req.body.image_url !== undefined
+        ? String(req.body.image_url).trim()
+        : existing.image_url;
+
     const isActive =
       req.body.is_active !== undefined
         ? Number(req.body.is_active) === 1
@@ -162,6 +172,14 @@ async function updateCategory(req, res, next) {
         'Category name must be at least 2 characters',
         422
       );
+    }
+
+    if (name.length > 120) {
+      return error(res, 'Category name is too long', 422);
+    }
+
+    if (imageUrl && imageUrl.length > 500) {
+      return error(res, 'Category image URL is too long', 422);
     }
 
     const slug = slugify(name);
@@ -190,12 +208,14 @@ async function updateCategory(req, res, next) {
          name = ?,
          slug = ?,
          description = ?,
+         image_url = ?,
          is_active = ?
        WHERE id = ?`,
       [
         name,
         slug,
         description || null,
+        imageUrl || null,
         isActive,
         id,
       ]
